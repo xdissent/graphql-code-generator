@@ -34,20 +34,6 @@ const makeDefaultLoader = (from: string) => {
 };
 
 export async function executeCodegen(input: CodegenContext | Types.Config): Promise<Types.FileOutput[]> {
-  function wrapTask(task: () => void | Promise<void>, source: string) {
-    return async () => {
-      try {
-        await Promise.resolve().then(() => task());
-      } catch (error) {
-        if (source && !(error instanceof GraphQLError)) {
-          error.source = source;
-        }
-
-        throw error;
-      }
-    };
-  }
-
   const context = ensureContext(input);
   const config = context.getConfig();
   const pluginContext = context.getPluginContext();
@@ -83,6 +69,22 @@ export async function executeCodegen(input: CodegenContext | Types.Config): Prom
   let rootSchemas: Types.Schema[];
   let rootDocuments: Types.OperationDocument[];
   const generates: { [filename: string]: Types.ConfiguredOutput } = {};
+
+  function wrapTask(task: () => void | Promise<void>, source: string, taskName: string) {
+    return () => {
+      return context.profiler.run(async () => {
+        try {
+          await Promise.resolve().then(() => task());
+        } catch (error) {
+          if (source && !(error instanceof GraphQLError)) {
+            error.source = source;
+          }
+
+          throw error;
+        }
+      }, taskName);
+    };
+  }
 
   async function normalize() {
     /* Load Require extensions */
@@ -198,106 +200,124 @@ export async function executeCodegen(input: CodegenContext | Types.Config): Prom
                 [
                   {
                     title: 'Load GraphQL schemas',
-                    task: wrapTask(async () => {
-                      debugLog(`[CLI] Loading Schemas`);
+                    task: wrapTask(
+                      async () => {
+                        debugLog(`[CLI] Loading Schemas`);
 
-                      const schemaPointerMap: any = {};
-                      const allSchemaUnnormalizedPointers = [...rootSchemas, ...outputSpecificSchemas];
-                      for (const unnormalizedPtr of allSchemaUnnormalizedPointers) {
-                        if (typeof unnormalizedPtr === 'string') {
-                          schemaPointerMap[unnormalizedPtr] = {};
-                        } else if (typeof unnormalizedPtr === 'object') {
-                          Object.assign(schemaPointerMap, unnormalizedPtr);
+                        const schemaPointerMap: any = {};
+                        const allSchemaUnnormalizedPointers = [...rootSchemas, ...outputSpecificSchemas];
+                        for (const unnormalizedPtr of allSchemaUnnormalizedPointers) {
+                          if (typeof unnormalizedPtr === 'string') {
+                            schemaPointerMap[unnormalizedPtr] = {};
+                          } else if (typeof unnormalizedPtr === 'object') {
+                            Object.assign(schemaPointerMap, unnormalizedPtr);
+                          }
                         }
-                      }
-                      outputSchemaAst = await context.loadSchema(schemaPointerMap);
-                      outputSchema = getCachedDocumentNodeFromSchema(outputSchemaAst);
-                    }, filename),
+                        outputSchemaAst = await context.loadSchema(schemaPointerMap);
+                        outputSchema = getCachedDocumentNodeFromSchema(outputSchemaAst);
+                      },
+                      filename,
+                      `Load GraphQL schemas: ${filename}`
+                    ),
                   },
                   {
                     title: 'Load GraphQL documents',
-                    task: wrapTask(async () => {
-                      debugLog(`[CLI] Loading Documents`);
+                    task: wrapTask(
+                      async () => {
+                        debugLog(`[CLI] Loading Documents`);
 
-                      const allDocuments = [...rootDocuments, ...outputSpecificDocuments];
-                      const documents = await context.loadDocuments(allDocuments);
+                        const allDocuments = [...rootDocuments, ...outputSpecificDocuments];
+                        const documents = await context.loadDocuments(allDocuments);
 
-                      if (documents.length > 0) {
-                        outputDocuments.push(...documents);
-                      }
-                    }, filename),
+                        if (documents.length > 0) {
+                          outputDocuments.push(...documents);
+                        }
+                      },
+                      filename,
+                      `Load GraphQL documents: ${filename}`
+                    ),
                   },
                   {
                     title: 'Generate',
-                    task: wrapTask(async () => {
-                      debugLog(`[CLI] Generating output`);
+                    task: wrapTask(
+                      async () => {
+                        debugLog(`[CLI] Generating output`);
 
-                      const normalizedPluginsArray = normalizeConfig(outputConfig.plugins);
-                      const pluginLoader = config.pluginLoader || makeDefaultLoader(context.cwd);
-                      const pluginPackages = await Promise.all(
-                        normalizedPluginsArray.map(plugin => getPluginByName(Object.keys(plugin)[0], pluginLoader))
-                      );
-                      const pluginMap: { [name: string]: CodegenPlugin } = {};
-                      const preset: Types.OutputPreset = hasPreset
-                        ? typeof outputConfig.preset === 'string'
-                          ? await getPresetByName(outputConfig.preset, makeDefaultLoader(context.cwd))
-                          : outputConfig.preset
-                        : null;
+                        const normalizedPluginsArray = normalizeConfig(outputConfig.plugins);
+                        const pluginLoader = config.pluginLoader || makeDefaultLoader(context.cwd);
+                        const pluginPackages = await Promise.all(
+                          normalizedPluginsArray.map(plugin => getPluginByName(Object.keys(plugin)[0], pluginLoader))
+                        );
+                        const pluginMap: { [name: string]: CodegenPlugin } = {};
+                        const preset: Types.OutputPreset = hasPreset
+                          ? typeof outputConfig.preset === 'string'
+                            ? await getPresetByName(outputConfig.preset, makeDefaultLoader(context.cwd))
+                            : outputConfig.preset
+                          : null;
 
-                      pluginPackages.forEach((pluginPackage, i) => {
-                        const plugin = normalizedPluginsArray[i];
-                        const name = Object.keys(plugin)[0];
+                        pluginPackages.forEach((pluginPackage, i) => {
+                          const plugin = normalizedPluginsArray[i];
+                          const name = Object.keys(plugin)[0];
 
-                        pluginMap[name] = pluginPackage;
-                      });
-
-                      const mergedConfig = {
-                        ...rootConfig,
-                        ...(typeof outputFileTemplateConfig === 'string'
-                          ? { value: outputFileTemplateConfig }
-                          : outputFileTemplateConfig),
-                      };
-
-                      let outputs: Types.GenerateOptions[] = [];
-
-                      if (hasPreset) {
-                        outputs = await preset.buildGeneratesSection({
-                          baseOutputDir: filename,
-                          presetConfig: outputConfig.presetConfig || {},
-                          plugins: normalizedPluginsArray,
-                          schema: outputSchema,
-                          schemaAst: outputSchemaAst,
-                          documents: outputDocuments,
-                          config: mergedConfig,
-                          pluginMap,
-                          pluginContext,
+                          pluginMap[name] = pluginPackage;
                         });
-                      } else {
-                        outputs = [
-                          {
-                            filename,
-                            plugins: normalizedPluginsArray,
-                            schema: outputSchema,
-                            schemaAst: outputSchemaAst,
-                            documents: outputDocuments,
-                            config: mergedConfig,
-                            pluginMap,
-                            pluginContext,
-                          },
-                        ];
-                      }
 
-                      const process = async (outputArgs: Types.GenerateOptions) => {
-                        const output = await codegen(outputArgs);
-                        result.push({
-                          filename: outputArgs.filename,
-                          content: output,
-                          hooks: outputConfig.hooks || {},
-                        });
-                      };
+                        const mergedConfig = {
+                          ...rootConfig,
+                          ...(typeof outputFileTemplateConfig === 'string'
+                            ? { value: outputFileTemplateConfig }
+                            : outputFileTemplateConfig),
+                        };
 
-                      await Promise.all(outputs.map(process));
-                    }, filename),
+                        let outputs: Types.GenerateOptions[] = [];
+
+                        if (hasPreset) {
+                          outputs = await context.profiler.run(
+                            async () =>
+                              preset.buildGeneratesSection({
+                                baseOutputDir: filename,
+                                presetConfig: outputConfig.presetConfig || {},
+                                plugins: normalizedPluginsArray,
+                                schema: outputSchema,
+                                schemaAst: outputSchemaAst,
+                                documents: outputDocuments,
+                                config: mergedConfig,
+                                pluginMap,
+                                pluginContext,
+                                profiler: context.profiler,
+                              }),
+                            `Build Generates Section: ${filename}`
+                          );
+                        } else {
+                          outputs = [
+                            {
+                              filename,
+                              plugins: normalizedPluginsArray,
+                              schema: outputSchema,
+                              schemaAst: outputSchemaAst,
+                              documents: outputDocuments,
+                              config: mergedConfig,
+                              pluginMap,
+                              pluginContext,
+                              profiler: context.profiler,
+                            },
+                          ];
+                        }
+
+                        const process = async (outputArgs: Types.GenerateOptions) => {
+                          const output = await codegen(outputArgs);
+                          result.push({
+                            filename: outputArgs.filename,
+                            content: output,
+                            hooks: outputConfig.hooks || {},
+                          });
+                        };
+
+                        await context.profiler.run(() => Promise.all(outputs.map(process)), `Codegen: ${filename}`);
+                      },
+                      filename,
+                      `Generate: ${filename}`
+                    ),
                   },
                 ],
                 {
