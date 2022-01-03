@@ -73,6 +73,24 @@ export async function loadSchema(
   }
 }
 
+const adjustRequirePointers = (
+  documentPointers: UnnormalizedTypeDefPointer | UnnormalizedTypeDefPointer[]
+): UnnormalizedTypeDefPointer | UnnormalizedTypeDefPointer[] => {
+  const adjustSinglePointer = (pointer: UnnormalizedTypeDefPointer): UnnormalizedTypeDefPointer => {
+    if (typeof pointer === 'object' && 'require' in pointer) {
+      const config = 'config' in pointer ? pointer.config : {};
+      return { [pointer['require']]: config };
+    }
+    return pointer;
+  };
+
+  if (Array.isArray(documentPointers)) {
+    return documentPointers.map(adjustSinglePointer);
+  } else {
+    return adjustSinglePointer(documentPointers);
+  }
+};
+
 export async function loadDocuments(
   documentPointers: UnnormalizedTypeDefPointer | UnnormalizedTypeDefPointer[],
   config: Types.Config
@@ -97,8 +115,7 @@ export async function loadDocuments(
     ignore.push(join(process.cwd(), generatePath));
   }
 
-  // TODO: adjust to load CustomDocumentRequire correctly
-  const loadedFromToolkit = await loadDocumentsToolkit(documentPointers, {
+  const loadedFromToolkit = await loadDocumentsToolkit(adjustRequirePointers(documentPointers), {
     ...defaultDocumentsLoadOptions,
     ignore,
     loaders,
