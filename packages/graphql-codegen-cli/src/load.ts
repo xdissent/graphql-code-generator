@@ -15,6 +15,7 @@ import { ApolloEngineLoader } from '@graphql-tools/apollo-engine-loader';
 import { PrismaLoader } from '@graphql-tools/prisma-loader';
 import path, { join, extname } from 'path';
 import { Source } from '@graphql-tools/utils/loaders';
+import { makeDefaultLoader } from './codegen';
 
 export const defaultSchemaLoadOptions = {
   assumeValidSDL: true,
@@ -77,11 +78,12 @@ export async function loadSchema(
 const requiredLoader = async (pointers: Types.CustomDocumentRequire[]): Promise<Source[]> => {
   return Promise.all(
     pointers.map(async pointer => {
-      const loader = (await import(path.join(__dirname, pointer.require))) as (params: {
+      const userLoader = (await makeDefaultLoader(process.cwd())(pointer.require)) as (params: {
         config: Record<string, any>;
         schema: GraphQLSchema;
       }) => Source[] | Promise<Source[]>;
-      return await loader(pointer.config, pointer.schema);
+      const documents = userLoader(pointer.config || {}, schema);
+      return documents;
     })
   ).then(results => [].concat(...results));
 };
